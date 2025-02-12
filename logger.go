@@ -1,4 +1,4 @@
-package logger
+package zaplogmanager
 
 import (
 	"compress/gzip"

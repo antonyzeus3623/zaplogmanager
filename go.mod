@@ -1,4 +1,4 @@
-module github.com/antonyzeus3623/logger
+module github.com/antonyzeus3623/zaplogmanager
 
 go 1.21
 
