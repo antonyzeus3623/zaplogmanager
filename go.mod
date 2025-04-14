@@ -4,7 +4,7 @@ go 1.21
 
 require (
 	github.com/lestrrat-go/file-rotatelogs v2.4.0+incompatible
-	go.uber.org/zap v1.26.0
+	go.uber.org/zap v1.27.0
 )
 
 require (

@@ -2,10 +2,12 @@ package zaplogmanager
 
 import (
 	"compress/gzip"
+	"fmt"
 	"go.uber.org/zap"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,8 +38,8 @@ func runCompressionJob(logDirs []string, compressMaxSave time.Duration) {
 		wg.Add(1)
 		go func(d string) {
 			defer wg.Done()
+			// 处理历史日志压缩
 			if err := filepath.Walk(d, func(path string, info os.FileInfo, err error) error {
-				// 关键修复点：增强错误处理
 				if err != nil {
 					if os.IsNotExist(err) {
 						return nil
@@ -45,18 +47,26 @@ func runCompressionJob(logDirs []string, compressMaxSave time.Duration) {
 					return err
 				}
 
-				// 压缩处理逻辑
+				// 当日大文件检测逻辑
+				if currentLogRegex.MatchString(path) && !isOldLogFile(path) {
+					if checkAndCompressCurrentLog(path) {
+						return nil
+					}
+				}
+
+				// 旧日志压缩逻辑
 				if !info.IsDir() && logExtRegex.MatchString(path) && isOldLogFile(path) && !isFileLocked(path) {
-					zap.S().Debugf("发现可压缩文件: %v", path)
+					zap.S().Debugf("发现可压缩旧文件: %v", path)
 					if err := safeCompress(path); err != nil {
-						zap.S().Errorf("压缩失败: %v", err)
+						zap.S().Errorf("旧文件压缩失败: %v", err)
 					}
 				}
 				return nil
 			}); err != nil {
 				zap.S().Errorf("目录遍历失败: %v", err)
 			}
-			// 清理操作
+
+			// 清理过期压缩文件（原有逻辑）
 			if err := cleanExpiredGzLogs(d, compressMaxSave); err != nil {
 				zap.S().Errorf("日志清理失败: %v", err)
 			}
@@ -153,5 +163,82 @@ func safeCompress(path string) error {
 	if _, err := os.Stat(path); err == nil {
 		return os.Remove(path)
 	}
+	return nil
+}
+
+// checkAndCompressCurrentLog 检查并压缩当前日志文件
+func checkAndCompressCurrentLog(path string) bool {
+	// 获取文件大小
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() < maxCurrentSize {
+		return false
+	}
+
+	// 执行带序号的压缩
+	if err := compressCurrentLogWithIndex(path); err != nil {
+		zap.S().Errorf("当日日志压缩失败: %s -> %v", path, err)
+		return false
+	}
+	return true
+}
+
+// compressCurrentLogWithIndex 带序号的当日日志压缩
+func compressCurrentLogWithIndex(src string) error {
+	// 获取基础文件名（不含扩展名）
+	baseName := strings.TrimSuffix(src, filepath.Ext(src))
+
+	// 查找可用序号
+	index := 1
+	for {
+		dst := fmt.Sprintf("%s.%d.gz", baseName, index)
+		if _, err := os.Stat(dst); os.IsNotExist(err) {
+			return gzipLogFileWithIndex(src, dst)
+		}
+		index++
+	}
+}
+
+// gzipLogFileWithIndex 带序号压缩实现
+func gzipLogFileWithIndex(src, dst string) error {
+	inFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("打开源文件失败: %w", err)
+	}
+	defer func() {
+		if err := inFile.Close(); err != nil {
+			zap.S().Error(err)
+		}
+	}()
+
+	outFile, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("创建压缩文件失败: %w", err)
+	}
+	defer func() {
+		if err := outFile.Close(); err != nil {
+			zap.S().Error(err)
+		}
+	}()
+
+	gzWriter := gzip.NewWriter(outFile)
+	defer func() {
+		if err := gzWriter.Close(); err != nil {
+			zap.S().Error(err)
+		}
+	}()
+
+	gzWriter.Name = filepath.Base(src)
+	gzWriter.ModTime = time.Now()
+
+	if _, err = io.Copy(gzWriter, inFile); err != nil {
+		return fmt.Errorf("压缩写入失败: %w", err)
+	}
+
+	// 清空原文件（而不是删除）
+	if err := os.Truncate(src, 0); err != nil {
+		return fmt.Errorf("清空原文件失败: %w", err)
+	}
+
+	zap.S().Infof("成功压缩大文件: %s -> %s", src, dst)
 	return nil
 }
