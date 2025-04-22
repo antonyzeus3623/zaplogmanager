@@ -1,7 +1,11 @@
 package zaplogmanager
 
 import (
+	"fmt"
 	"go.uber.org/zap"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -17,6 +21,20 @@ func StartLogCompression(hour, minute, second int, compressMaxSave time.Duration
 
 	// 启动定时任务
 	go scheduleDailyJob(hour, minute, second, compressMaxSave, logDirs...)
+
+	// 	每小时监控任务
+	go func() {
+		ticker := time.NewTicker(sizeCheckInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				zap.S().Debugf("启动小时级日志大小监控...")
+				safeRunCompressionJob(logDirs, compressMaxSave)
+			}
+		}
+	}()
 }
 
 // scheduleDailyJob 核心调度逻辑
@@ -36,7 +54,50 @@ func scheduleDailyJob(hour, minute, second int, compressMaxSave time.Duration, l
 
 		// 重置定时器为24小时循环
 		timer.Stop() // 清除已到期定时器
+
+		// 	执行跨天压缩
+		fileLock.Lock()
+		processOvernightLogs(logDirs)
+		fileLock.Unlock()
 	}
+}
+
+func processOvernightLogs(logDirs []string) {
+	yesterday := time.Now().AddDate(0, 0, -1).Format(dateFormat)
+
+	for _, dir := range logDirs {
+		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if currentLogRegex.MatchString(path) && isYesterdayLog(path, yesterday) {
+				zap.S().Infof("检测到跨天日志：%s", path)
+				if err := forceCompressOvernightLog(path); err != nil {
+					zap.S().Errorf("跨天压缩失败：%v", err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			zap.S().Error(err)
+			return
+		}
+	}
+}
+
+// forceCompressOvernightLog 跨天压缩
+func forceCompressOvernightLog(src string) error {
+	baseName := strings.TrimSuffix(src, filepath.Ext(src))
+	compressedName := fmt.Sprintf("%s.1.gz", baseName)
+
+	// 	存在则递增序号
+	if _, err := os.Stat(compressedName); err == nil {
+		return compressCurrentLogWithIndex(src)
+	}
+
+	return gzipLogFileWithIndex(src, compressedName)
+}
+
+func isYesterdayLog(path string, yesterday string) bool {
+	baseName := filepath.Base(path)
+	return strings.Contains(baseName, yesterday) && !gzExtRegex.MatchString(baseName)
 }
 
 // 计算下一个执行时刻（精确到秒）

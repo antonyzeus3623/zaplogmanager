@@ -53,20 +53,3 @@ func isOldLogFile(path string) bool {
 	// 文件日期是否是当日
 	return fileDate.Before(currentDate)
 }
-
-// isGzExpired 判断压缩文件是否过期
-func isGzExpired(path string, maxSaveTime time.Duration) bool {
-	filename := filepath.Base(path)
-	match := dateRegex.FindStringSubmatch(filename)
-	if len(match) == 0 {
-		return false
-	}
-
-	fileDate, err := time.Parse("20060102", match[1])
-	if err != nil {
-		return false
-	}
-
-	expirationTime := time.Now().Add(-maxSaveTime)
-	return fileDate.Before(expirationTime)
-}

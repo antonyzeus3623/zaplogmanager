@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -122,27 +124,37 @@ func gzipLogFile(src string) error {
 
 // cleanExpiredGzLogs 清理过期压缩日志（包含原始.log和压缩的.gz）
 func cleanExpiredGzLogs(logDir string, maxSaveTime time.Duration) error {
-	return filepath.Walk(logDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
+	cutoffDate := time.Now().Add(-maxSaveTime)
 
-		// 跳过目录
-		if info.IsDir() {
+	return filepath.Walk(logDir, func(path string, info os.FileInfo, err error) error {
+		if !gzExtRegex.MatchString(path) {
 			return nil
 		}
 
-		// 仅处理.gz压缩文件
-		if gzExtRegex.MatchString(path) {
-			if isGzExpired(path, maxSaveTime) && !isFileLocked(path) {
-				if err := os.Remove(path); err != nil {
-					return err
-				}
-				zap.S().Infof("已删除过期压缩文件: %s", path)
+		// 解析文件名中的日期
+		if fileDate, err := parseDateFromFileName(path); err == nil {
+			if fileDate.Before(cutoffDate) {
+				zap.S().Infof("清理过期文件：%s (创建时间：%s)", path, fileDate.Format(dateFormat))
+				return os.Remove(path)
 			}
 		}
+
 		return nil
 	})
+}
+
+// parseDateFromFileName 日期解析
+func parseDateFromFileName(path string) (time.Time, error) {
+	// 匹配格式示例:
+	// - log-20250422.log.1.gz
+	// - applog_2025-04-22.log.5.gz
+
+	re := regexp.MustCompile(`(\d{4})[-_]?(\d{2})[-_]?(\d{2})`)
+	matches := re.FindStringSubmatch(filepath.Base(path))
+	if len(matches) < 4 {
+		return time.Time{}, fmt.Errorf("invalid filename format")
+	}
+	return time.Parse("20060102", fmt.Sprintf("%s%s%s", matches[1], matches[2], matches[3]))
 }
 
 // safeCompress 安全压缩函数
@@ -168,6 +180,11 @@ func safeCompress(path string) error {
 
 // checkAndCompressCurrentLog 检查并压缩当前日志文件
 func checkAndCompressCurrentLog(path string) bool {
+	// 双重校验机制防止误判
+	if isOldLogFile(path) || isFileLocked(path) {
+		return false
+	}
+
 	// 获取文件大小
 	fi, err := os.Stat(path)
 	if err != nil || fi.Size() < maxCurrentSize {
@@ -175,27 +192,69 @@ func checkAndCompressCurrentLog(path string) bool {
 	}
 
 	// 执行带序号的压缩
-	if err := compressCurrentLogWithIndex(path); err != nil {
-		zap.S().Errorf("当日日志压缩失败: %s -> %v", path, err)
-		return false
+	for i := 0; i < 3; i++ {
+		if err := compressCurrentLogWithIndex(path); err == nil {
+			return true
+		}
+		time.Sleep(time.Second * 1)
 	}
-	return true
+
+	zap.S().Errorf("当日日志压缩失败: %s -> %v", path, err)
+	return false
 }
 
 // compressCurrentLogWithIndex 带序号的当日日志压缩
 func compressCurrentLogWithIndex(src string) error {
-	// 获取基础文件名（不含扩展名）
 	baseName := strings.TrimSuffix(src, filepath.Ext(src))
+	existingFiles, _ := filepath.Glob(baseName + ".*.gz")
 
-	// 查找可用序号
-	index := 1
-	for {
-		dst := fmt.Sprintf("%s.%d.gz", baseName, index)
-		if _, err := os.Stat(dst); os.IsNotExist(err) {
-			return gzipLogFileWithIndex(src, dst)
+	// 	原子化序号生成
+	maxIndex := 0
+	for _, f := range existingFiles {
+		if idx := existingIndex(f); idx > maxIndex {
+			maxIndex = idx
 		}
-		index++
 	}
+	nextIndex := maxIndex + 1
+
+	// 	带时间戳的压缩文件名
+	compressedName := fmt.Sprintf("%s.%d.gz", baseName, nextIndex)
+	return atomicGzipWithIndex(src, compressedName)
+}
+
+func existingIndex(f string) int {
+	re := regexp.MustCompile(`\.log\.(\d+)\.gz$`)
+	matches := re.FindStringSubmatch(f)
+	if len(matches) < 2 {
+		return 0
+	}
+
+	idx, _ := strconv.Atoi(matches[1])
+
+	return idx
+}
+
+// atomicGzipWithIndex 原子化压缩操作
+func atomicGzipWithIndex(src, dst string) error {
+	// 确保目标目录存在
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return fmt.Errorf("创建目录失败：%w", err)
+	}
+
+	// 	创建临时文件避免中间状态
+	tmpFile := dst + ".tmp"
+	defer func() {
+		if err := os.Remove(tmpFile); err != nil {
+			zap.S().Error(err)
+		}
+	}()
+
+	if err := gzipLogFileWithIndex(src, tmpFile); err != nil {
+		return err
+	}
+
+	// 	原子重命名
+	return os.Rename(tmpFile, dst)
 }
 
 // gzipLogFileWithIndex 带序号压缩实现
