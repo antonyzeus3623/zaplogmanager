@@ -3,7 +3,6 @@ package zaplogmanager
 import (
 	"compress/gzip"
 	"fmt"
-	"go.uber.org/zap"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,26 +11,50 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // 文件操作和压缩处理模块
 
-// runCompressionJob 立即执行压缩任务
+// 使用细粒度锁替代全局锁
+type dirLockMap struct {
+	locks map[string]*sync.Mutex
+	mu    sync.Mutex
+}
+
+var (
+	dirLocks = &dirLockMap{
+		locks: make(map[string]*sync.Mutex),
+	}
+)
+
+// getLock 获取目录级别的锁
+func (dm *dirLockMap) getLock(dir string) *sync.Mutex {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	if lock, exists := dm.locks[dir]; exists {
+		return lock
+	}
+
+	lock := &sync.Mutex{}
+	dm.locks[dir] = lock
+	return lock
+}
+
+// runCompressionJob 优化后的压缩任务
 func runCompressionJob(logDirs []string, compressMaxSave time.Duration) {
 	zap.S().Debugf("开始处理目录: %v", logDirs)
-	fileLock.Lock()
-	defer fileLock.Unlock()
 
 	var wg sync.WaitGroup
 	for _, rawDir := range logDirs {
-		// 统一转换为绝对路径
 		absDir, err := filepath.Abs(rawDir)
 		if err != nil {
 			zap.S().Errorf("路径转换失败: %v", err)
 			continue
 		}
 
-		// 目录存在性检查
 		if fi, err := os.Stat(absDir); err != nil || !fi.IsDir() {
 			zap.S().Warnf("目录不存在: %v", absDir)
 			continue
@@ -40,41 +63,61 @@ func runCompressionJob(logDirs []string, compressMaxSave time.Duration) {
 		wg.Add(1)
 		go func(d string) {
 			defer wg.Done()
-			// 处理历史日志压缩
-			if err := filepath.Walk(d, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					if os.IsNotExist(err) {
-						return nil
-					}
-					return err
-				}
 
-				// 当日大文件检测逻辑
-				if currentLogRegex.MatchString(path) && !isOldLogFile(path) {
-					if checkAndCompressCurrentLog(path) {
-						return nil
-					}
-				}
+			dirLock := dirLocks.getLock(d)
+			dirLock.Lock()
+			defer dirLock.Unlock()
 
-				// 旧日志压缩逻辑
-				if !info.IsDir() && logExtRegex.MatchString(path) && isOldLogFile(path) && !isFileLocked(path) {
-					zap.S().Debugf("发现可压缩旧文件: %v", path)
-					if err := safeCompress(path); err != nil {
-						zap.S().Errorf("旧文件压缩失败: %v", err)
-					}
-				}
-				return nil
-			}); err != nil {
-				zap.S().Errorf("目录遍历失败: %v", err)
-			}
-
-			// 清理过期压缩文件（原有逻辑）
-			if err := cleanExpiredGzLogs(d, compressMaxSave); err != nil {
-				zap.S().Errorf("日志清理失败: %v", err)
+			if err := processDirectory(d, compressMaxSave); err != nil {
+				zap.S().Errorf("目录处理失败: %v", err)
 			}
 		}(absDir)
 	}
 	wg.Wait()
+}
+
+// processDirectory 处理单个目录
+func processDirectory(dir string, compressMaxSave time.Duration) error {
+	// 处理历史日志压缩
+	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+
+		if !info.IsDir() {
+			if err := processFile(path); err != nil {
+				zap.S().Errorf("文件处理失败: %v", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	// 清理过期压缩文件
+	return cleanExpiredGzLogs(dir, compressMaxSave)
+}
+
+// processFile 处理单个文件
+func processFile(path string) error {
+	// 当日大文件检测逻辑
+	if currentLogRegex.MatchString(path) && !isOldLogFile(path) {
+		if checkAndCompressCurrentLog(path) {
+			return nil
+		}
+	}
+
+	// 旧日志压缩逻辑
+	if logExtRegex.MatchString(path) && isOldLogFile(path) && !isFileLocked(path) {
+		zap.S().Debugf("发现可压缩旧文件: %v", path)
+		if err := safeCompress(path); err != nil {
+			return fmt.Errorf("旧文件压缩失败: %v", err)
+		}
+	}
+	return nil
 }
 
 // gzipLogFile 压缩单个日志文件为.gz格式

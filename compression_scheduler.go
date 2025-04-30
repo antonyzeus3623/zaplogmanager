@@ -2,11 +2,12 @@ package zaplogmanager
 
 import (
 	"fmt"
-	"go.uber.org/zap"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // 定时任务调度模块
@@ -15,24 +16,20 @@ import (
 // 参数说明：hour(小时) minute(分钟) second(秒) - 每天运行时间
 // compressMaxSave: 压缩文件保留时间 logDirs: 需要监控的日志目录
 func StartLogCompression(hour, minute, second int, compressMaxSave time.Duration, logDirs ...string) {
-	// 程序启动时立即执行一次日志压缩和清理
 	zap.S().Debugf("开始启动首次日志压缩和清理...")
 	safeRunCompressionJob(logDirs, compressMaxSave)
 
 	// 启动定时任务
 	go scheduleDailyJob(hour, minute, second, compressMaxSave, logDirs...)
 
-	// 	每小时监控任务
+	// 启动一个独立的goroutine来执行定时监控任务
 	go func() {
 		ticker := time.NewTicker(sizeCheckInterval)
 		defer ticker.Stop()
 
-		for {
-			select {
-			case <-ticker.C:
-				zap.S().Debugf("启动小时级日志大小监控...")
-				safeRunCompressionJob(logDirs, compressMaxSave)
-			}
+		for range ticker.C {
+			zap.S().Debugf("启动小时级日志大小监控...")
+			safeRunCompressionJob(logDirs, compressMaxSave)
 		}
 	}()
 }

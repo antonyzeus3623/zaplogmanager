@@ -17,6 +17,6 @@ var (
 	currentLogRegex = regexp.MustCompile(`\.log$`) // 匹配当前正在写入的日志文件
 
 	maxCurrentSize    = int64(1 << 30) // 1GB阈值
-	sizeCheckInterval = time.Hour      // 每小时检查一次
+	sizeCheckInterval = time.Hour * 2  // 每两个小时检查一次
 	dateFormat        = "20060102"     // 日期格式
 )

@@ -21,30 +21,32 @@ func InitLogger(warnFile, infoFile, debugFile, newName string, maxSaveTime, rota
 	var cores []zapcore.Core
 
 	if warnFile != "" {
-		warnWriter := SetRotateRule(warnFile, newName, maxSaveTime, rotationTime) // "./log/warn/warn.log"
-		warnCore := zapcore.NewCore(GetConfig(), warnWriter, zap.WarnLevel)
+		warnWriter := SetRotateRule(warnFile, newName, maxSaveTime, rotationTime)
+		bufferedWarnWriter := NewBufferedWriteSyncer(warnWriter)
+		warnCore := zapcore.NewCore(GetConfig(), bufferedWarnWriter, zap.WarnLevel)
 		cores = append(cores, warnCore)
 	}
 
 	if infoFile != "" {
-		infoWriter := SetRotateRule(infoFile, newName, maxSaveTime, rotationTime) // "./log/info/info.log"
-		infoCore := zapcore.NewCore(GetConfig(), infoWriter, zap.InfoLevel)
+		infoWriter := SetRotateRule(infoFile, newName, maxSaveTime, rotationTime)
+		bufferedInfoWriter := NewBufferedWriteSyncer(infoWriter)
+		infoCore := zapcore.NewCore(GetConfig(), bufferedInfoWriter, zap.InfoLevel)
 		cores = append(cores, infoCore)
 	}
 
 	if debugFile != "" {
-		debugWriter := SetRotateRule(debugFile, newName, maxSaveTime, rotationTime) // "./log/debug/debug.log"
-		debugCore := zapcore.NewCore(GetConfig(), debugWriter, zap.DebugLevel)
+		debugWriter := SetRotateRule(debugFile, newName, maxSaveTime, rotationTime)
+		bufferedDebugWriter := NewBufferedWriteSyncer(debugWriter)
+		debugCore := zapcore.NewCore(GetConfig(), bufferedDebugWriter, zap.DebugLevel)
 		cores = append(cores, debugCore)
 	}
 
-	consoleCore := zapcore.NewCore(GetConfig(), zapcore.Lock(zapcore.AddSync(zapcore.AddSync(os.Stdout))), zap.DebugLevel)
+	// 控制台输出使用无缓冲的写入器
+	consoleCore := zapcore.NewCore(GetConfig(), zapcore.Lock(zapcore.AddSync(os.Stdout)), zap.DebugLevel)
 	cores = append(cores, consoleCore)
 
 	core := zapcore.NewTee(cores...)
-
-	_logger := zap.New(core, zap.AddCaller()) // 将调用函数信息记录到日志
-
+	_logger := zap.New(core, zap.AddCaller())
 	zap.ReplaceGlobals(_logger)
 
 	// 启动定时压缩任务
@@ -75,4 +77,54 @@ func SetRotateRule(fileName, newName string, maxSaveTime, rotationTime time.Dura
 	}
 
 	return zapcore.AddSync(hook)
+}
+
+const (
+	bufferSize = 256 * 1024 // 256KB buffer
+)
+
+// BufferedWriteSyncer 带缓冲的写入器
+type BufferedWriteSyncer struct {
+	buffer chan []byte
+	writer zapcore.WriteSyncer
+}
+
+// NewBufferedWriteSyncer 创建新的带缓冲的写入器
+func NewBufferedWriteSyncer(writer zapcore.WriteSyncer) *BufferedWriteSyncer {
+	ws := &BufferedWriteSyncer{
+		buffer: make(chan []byte, bufferSize),
+		writer: writer,
+	}
+	go ws.flushRoutine()
+	return ws
+}
+
+// Write 实现 io.Writer
+func (ws *BufferedWriteSyncer) Write(p []byte) (n int, err error) {
+	// 复制数据以避免竞态条件
+	data := make([]byte, len(p))
+	copy(data, p)
+
+	select {
+	case ws.buffer <- data:
+		return len(p), nil
+	default:
+		// 如果缓冲区满，直接写入
+		return ws.writer.Write(p)
+	}
+}
+
+// Sync 实现 zapcore.WriteSyncer
+func (ws *BufferedWriteSyncer) Sync() error {
+	return ws.writer.Sync()
+}
+
+// flushRoutine 异步刷新缓冲区
+func (ws *BufferedWriteSyncer) flushRoutine() {
+	for data := range ws.buffer {
+		_, err := ws.writer.Write(data)
+		if err != nil {
+			zap.L().Error("Failed to write log", zap.Error(err))
+		}
+	}
 }
