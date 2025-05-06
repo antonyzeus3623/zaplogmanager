@@ -27,6 +27,8 @@ var (
 	dirLocks = &dirLockMap{
 		locks: make(map[string]*sync.Mutex),
 	}
+	processingDirs = make(map[string]bool)
+	processingMu   sync.Mutex
 )
 
 // getLock 获取目录级别的锁
@@ -47,6 +49,17 @@ func (dm *dirLockMap) getLock(dir string) *sync.Mutex {
 func runCompressionJob(logDirs []string, compressMaxSave time.Duration) {
 	zap.S().Debugf("开始处理目录: %v", logDirs)
 
+	// 检查是否有正在处理的目录
+	processingMu.Lock()
+	for _, dir := range logDirs {
+		if processingDirs[dir] {
+			zap.S().Debugf("目录正在处理中，跳过: %v", dir)
+			continue
+		}
+		processingDirs[dir] = true
+	}
+	processingMu.Unlock()
+
 	var wg sync.WaitGroup
 	for _, rawDir := range logDirs {
 		absDir, err := filepath.Abs(rawDir)
@@ -63,6 +76,11 @@ func runCompressionJob(logDirs []string, compressMaxSave time.Duration) {
 		wg.Add(1)
 		go func(d string) {
 			defer wg.Done()
+			defer func() {
+				processingMu.Lock()
+				delete(processingDirs, d)
+				processingMu.Unlock()
+			}()
 
 			dirLock := dirLocks.getLock(d)
 			dirLock.Lock()
@@ -78,6 +96,9 @@ func runCompressionJob(logDirs []string, compressMaxSave time.Duration) {
 
 // processDirectory 处理单个目录
 func processDirectory(dir string, compressMaxSave time.Duration) error {
+	// 使用map记录已处理的文件，避免重复处理
+	processedFiles := make(map[string]bool)
+
 	// 处理历史日志压缩
 	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -88,6 +109,12 @@ func processDirectory(dir string, compressMaxSave time.Duration) error {
 		}
 
 		if !info.IsDir() {
+			// 检查文件是否已处理
+			if processedFiles[path] {
+				return nil
+			}
+			processedFiles[path] = true
+
 			if err := processFile(path); err != nil {
 				zap.S().Errorf("文件处理失败: %v", err)
 			}
