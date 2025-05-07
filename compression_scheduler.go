@@ -5,9 +5,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
+)
+
+// 添加全局任务锁和状态控制
+var (
+	taskLock    sync.Mutex
+	lastRunTime time.Time
+	minInterval = time.Second * 5 // 最小任务间隔
 )
 
 // 定时任务调度模块
@@ -22,7 +30,8 @@ func StartLogCompression(hour, minute, second int, compressMaxSave time.Duration
 	// 启动定时任务
 	go scheduleDailyJob(hour, minute, second, compressMaxSave, logDirs...)
 
-	// 启动一个独立的goroutine来执行定时监控任务
+	// 启动一个独立goroutine来执行定时监控任务
+	// 启动大小监控任务
 	go func() {
 		ticker := time.NewTicker(sizeCheckInterval)
 		defer ticker.Stop()
@@ -36,26 +45,22 @@ func StartLogCompression(hour, minute, second int, compressMaxSave time.Duration
 
 // scheduleDailyJob 核心调度逻辑
 func scheduleDailyJob(hour, minute, second int, compressMaxSave time.Duration, logDirs ...string) {
-	// 保证只在一个循环中触发
 	for {
-		// 计算到下次执行时间的延迟
 		next := nextRunTime(hour, minute, second)
-		waitDuration := time.Until(next)
+		timer := time.NewTimer(time.Until(next))
+		<-timer.C
 
-		// 创建精准定时器
-		timer := time.NewTimer(waitDuration)
-		<-timer.C // 等待到目标时间
+		if isTargetHour(next, 1) {
+			// 执行压缩任务
+			safeRunCompressionJob(logDirs, compressMaxSave)
 
-		// 执行压缩任务
-		safeRunCompressionJob(logDirs, compressMaxSave)
+			// 执行跨天压缩
+			fileLock.Lock()
+			processOvernightLogs(logDirs)
+			fileLock.Unlock()
+		}
 
-		// 重置定时器为24小时循环
-		timer.Stop() // 清除已到期定时器
-
-		// 	执行跨天压缩
-		fileLock.Lock()
-		processOvernightLogs(logDirs)
-		fileLock.Unlock()
+		timer.Stop()
 	}
 }
 
@@ -79,6 +84,11 @@ func processOvernightLogs(logDirs []string) {
 	}
 }
 
+// isTargetHour 判断是否是目标小时
+func isTargetHour(t time.Time, targetHour int) bool {
+	return t.Hour() == targetHour
+}
+
 // forceCompressOvernightLog 跨天压缩
 func forceCompressOvernightLog(src string) error {
 	baseName := strings.TrimSuffix(src, filepath.Ext(src))
@@ -99,7 +109,7 @@ func isYesterdayLog(path string, yesterday string) bool {
 
 // 计算下一个执行时刻（精确到秒）
 func nextRunTime(targetHour, targetMin, targetSec int) time.Time {
-	now := time.Now().Truncate(time.Second) // 去掉纳秒级时间
+	now := time.Now()
 
 	// 构造目标时间
 	next := time.Date(
@@ -110,7 +120,7 @@ func nextRunTime(targetHour, targetMin, targetSec int) time.Time {
 
 	// 如果今天的时间已过，则设置为明天
 	if next.Before(now) {
-		next = next.AddDate(0, 0, 1)
+		next = next.Add(24 * time.Hour)
 	}
 
 	return next

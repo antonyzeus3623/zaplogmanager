@@ -29,6 +29,9 @@ var (
 	}
 	processingDirs = make(map[string]bool)
 	processingMu   sync.Mutex
+	// 添加文件处理状态跟踪
+	processingFiles = make(map[string]bool)
+	filesMu         sync.Mutex
 )
 
 // getLock 获取目录级别的锁
@@ -51,17 +54,32 @@ func runCompressionJob(logDirs []string, compressMaxSave time.Duration) {
 
 	// 检查是否有正在处理的目录
 	processingMu.Lock()
+	// 清理过期的处理状态（超过5分钟未完成的任务）
+	for dir, _ := range processingDirs {
+		if time.Since(lastRunTime) > time.Minute*5 {
+			delete(processingDirs, dir)
+		}
+	}
+
+	// 检查并标记要处理的目录
+	dirsToProcess := make([]string, 0)
 	for _, dir := range logDirs {
 		if processingDirs[dir] {
 			zap.S().Debugf("目录正在处理中，跳过: %v", dir)
 			continue
 		}
 		processingDirs[dir] = true
+		dirsToProcess = append(dirsToProcess, dir)
 	}
 	processingMu.Unlock()
 
+	if len(dirsToProcess) == 0 {
+		zap.S().Debugf("没有需要处理的目录")
+		return
+	}
+
 	var wg sync.WaitGroup
-	for _, rawDir := range logDirs {
+	for _, rawDir := range dirsToProcess {
 		absDir, err := filepath.Abs(rawDir)
 		if err != nil {
 			zap.S().Errorf("路径转换失败: %v", err)
@@ -96,8 +114,14 @@ func runCompressionJob(logDirs []string, compressMaxSave time.Duration) {
 
 // processDirectory 处理单个目录
 func processDirectory(dir string, compressMaxSave time.Duration) error {
-	// 使用map记录已处理的文件，避免重复处理
-	processedFiles := make(map[string]bool)
+	// 清理过期的文件处理状态
+	filesMu.Lock()
+	for file, _ := range processingFiles {
+		if time.Since(lastRunTime) > time.Minute*5 {
+			delete(processingFiles, file)
+		}
+	}
+	filesMu.Unlock()
 
 	// 处理历史日志压缩
 	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -109,11 +133,21 @@ func processDirectory(dir string, compressMaxSave time.Duration) error {
 		}
 
 		if !info.IsDir() {
-			// 检查文件是否已处理
-			if processedFiles[path] {
+			// 检查文件是否正在处理
+			filesMu.Lock()
+			if processingFiles[path] {
+				filesMu.Unlock()
 				return nil
 			}
-			processedFiles[path] = true
+			processingFiles[path] = true
+			filesMu.Unlock()
+
+			// 确保在处理完成后清理状态
+			defer func() {
+				filesMu.Lock()
+				delete(processingFiles, path)
+				filesMu.Unlock()
+			}()
 
 			if err := processFile(path); err != nil {
 				zap.S().Errorf("文件处理失败: %v", err)
