@@ -91,15 +91,22 @@ func isTargetHour(t time.Time, targetHour int) bool {
 
 // forceCompressOvernightLog 跨天压缩
 func forceCompressOvernightLog(src string) error {
-	baseName := strings.TrimSuffix(src, filepath.Ext(src))
+	// 保持原始文件名格式，只添加序号和.gz后缀
+	baseName := src
 	compressedName := fmt.Sprintf("%s.1.gz", baseName)
 
-	// 	存在则递增序号
+	// 检查是否已存在压缩文件
 	if _, err := os.Stat(compressedName); err == nil {
 		return compressCurrentLogWithIndex(src)
 	}
 
-	return gzipLogFileWithIndex(src, compressedName)
+	// 执行压缩
+	if err := gzipLogFileWithIndex(src, compressedName); err != nil {
+		return fmt.Errorf("跨天压缩失败: %w", err)
+	}
+
+	// 压缩成功后删除原文件
+	return os.Remove(src)
 }
 
 func isYesterdayLog(path string, yesterday string) bool {

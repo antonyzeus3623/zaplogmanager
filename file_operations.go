@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -307,12 +306,62 @@ func checkAndCompressCurrentLog(path string) bool {
 	return false
 }
 
+// gzipLogFileWithIndex 带序号压缩实现
+func gzipLogFileWithIndex(src, dst string) error {
+	// 打开源文件
+	inFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("打开源文件失败: %w", err)
+	}
+	defer inFile.Close()
+
+	// 创建临时文件
+	tmpFile := dst + ".tmp"
+	outFile, err := os.Create(tmpFile)
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	defer func() {
+		outFile.Close()
+		os.Remove(tmpFile) // 清理临时文件
+	}()
+
+	// 创建gzip写入器
+	gzWriter := gzip.NewWriter(outFile)
+	defer gzWriter.Close()
+
+	// 设置压缩头信息
+	gzWriter.Name = filepath.Base(src)
+	gzWriter.ModTime = time.Now()
+
+	// 执行压缩
+	if _, err = io.Copy(gzWriter, inFile); err != nil {
+		return fmt.Errorf("压缩写入失败: %w", err)
+	}
+
+	// 确保所有数据都写入
+	if err = gzWriter.Close(); err != nil {
+		return fmt.Errorf("关闭压缩写入器失败: %w", err)
+	}
+	if err = outFile.Close(); err != nil {
+		return fmt.Errorf("关闭输出文件失败: %w", err)
+	}
+
+	// 原子重命名临时文件为目标文件
+	if err = os.Rename(tmpFile, dst); err != nil {
+		return fmt.Errorf("重命名临时文件失败: %w", err)
+	}
+
+	zap.S().Infof("成功压缩大文件: %s -> %s", src, dst)
+	return nil
+}
+
 // compressCurrentLogWithIndex 带序号的当日日志压缩
 func compressCurrentLogWithIndex(src string) error {
-	baseName := strings.TrimSuffix(src, filepath.Ext(src))
+	baseName := src
 	existingFiles, _ := filepath.Glob(baseName + ".*.gz")
 
-	// 	原子化序号生成
+	// 原子化序号生成
 	maxIndex := 0
 	for _, f := range existingFiles {
 		if idx := existingIndex(f); idx > maxIndex {
@@ -321,9 +370,9 @@ func compressCurrentLogWithIndex(src string) error {
 	}
 	nextIndex := maxIndex + 1
 
-	// 	带时间戳的压缩文件名
+	// 带时间戳的压缩文件名
 	compressedName := fmt.Sprintf("%s.%d.gz", baseName, nextIndex)
-	return atomicGzipWithIndex(src, compressedName)
+	return gzipLogFileWithIndex(src, compressedName)
 }
 
 func existingIndex(f string) int {
@@ -336,72 +385,4 @@ func existingIndex(f string) int {
 	idx, _ := strconv.Atoi(matches[1])
 
 	return idx
-}
-
-// atomicGzipWithIndex 原子化压缩操作
-func atomicGzipWithIndex(src, dst string) error {
-	// 确保目标目录存在
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return fmt.Errorf("创建目录失败：%w", err)
-	}
-
-	// 	创建临时文件避免中间状态
-	tmpFile := dst + ".tmp"
-	defer func() {
-		if err := os.Remove(tmpFile); err != nil {
-			zap.S().Error(err)
-		}
-	}()
-
-	if err := gzipLogFileWithIndex(src, tmpFile); err != nil {
-		return err
-	}
-
-	// 	原子重命名
-	return os.Rename(tmpFile, dst)
-}
-
-// gzipLogFileWithIndex 带序号压缩实现
-func gzipLogFileWithIndex(src, dst string) error {
-	inFile, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("打开源文件失败: %w", err)
-	}
-	defer func() {
-		if err := inFile.Close(); err != nil {
-			zap.S().Error(err)
-		}
-	}()
-
-	outFile, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("创建压缩文件失败: %w", err)
-	}
-	defer func() {
-		if err := outFile.Close(); err != nil {
-			zap.S().Error(err)
-		}
-	}()
-
-	gzWriter := gzip.NewWriter(outFile)
-	defer func() {
-		if err := gzWriter.Close(); err != nil {
-			zap.S().Error(err)
-		}
-	}()
-
-	gzWriter.Name = filepath.Base(src)
-	gzWriter.ModTime = time.Now()
-
-	if _, err = io.Copy(gzWriter, inFile); err != nil {
-		return fmt.Errorf("压缩写入失败: %w", err)
-	}
-
-	// 清空原文件（而不是删除）
-	if err := os.Truncate(src, 0); err != nil {
-		return fmt.Errorf("清空原文件失败: %w", err)
-	}
-
-	zap.S().Infof("成功压缩大文件: %s -> %s", src, dst)
-	return nil
 }
