@@ -241,12 +241,16 @@ func cleanExpiredGzLogs(logDir string, maxSaveTime time.Duration) error {
 		}
 
 		// 解析文件名中的日期
-		if fileDate, err := parseDateFromFileName(path); err == nil {
-			if fileDate.Before(cutoffDate) {
-				zap.S().Infof("清理过期文件：%s (创建时间：%s)", path, fileDate.Format(dateFormat))
-				if err := os.Remove(path); err != nil {
-					zap.S().Errorf("删除过期文件失败：%v", err)
-				}
+		fileDate, err := parseDateFromFileName(path)
+		if err != nil {
+			zap.S().Debugf("无法解析文件日期：%s, 错误：%v", path, err)
+			return nil
+		}
+
+		if fileDate.Before(cutoffDate) {
+			zap.S().Infof("清理过期文件：%s (创建时间：%s)", path, fileDate.Format("2006-01-02"))
+			if err := os.Remove(path); err != nil {
+				zap.S().Errorf("删除过期文件失败：%v", err)
 			}
 		}
 
@@ -262,15 +266,20 @@ func parseDateFromFileName(path string) (time.Time, error) {
 	// - log-20250422.log.gz
 
 	re := regexp.MustCompile(
-		`(?:^|[-_./])(20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01]))(?:[-_.]|$)`,
+		`(?:^|[-_./])(20\d{2})(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])(?:[-_.]|$)`,
 	)
 	matches := re.FindStringSubmatch(filepath.Base(path))
-	if len(matches) < 4 {
+	if len(matches) < 2 {
 		return time.Time{}, fmt.Errorf("invalid filename format")
 	}
 
+	// 提取年月日
+	year := matches[1]
+	month := matches[0][len(year) : len(year)+2]
+	day := matches[0][len(year)+2 : len(year)+4]
+
 	// 尝试解析日期
-	dateStr := fmt.Sprintf("%s%s%s", matches[1], matches[2], matches[3])
+	dateStr := fmt.Sprintf("%s%s%s", year, month, day)
 	return time.Parse("20060102", dateStr)
 }
 
