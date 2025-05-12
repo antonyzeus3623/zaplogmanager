@@ -56,7 +56,7 @@ func scheduleDailyJob(hour, minute, second int, compressMaxSave time.Duration, l
 
 			// 执行跨天压缩
 			fileLock.Lock()
-			processOvernightLogs(logDirs)
+			processOvernightLogs(logDirs, compressMaxSave)
 			fileLock.Unlock()
 		}
 
@@ -64,10 +64,11 @@ func scheduleDailyJob(hour, minute, second int, compressMaxSave time.Duration, l
 	}
 }
 
-func processOvernightLogs(logDirs []string) {
+func processOvernightLogs(logDirs []string, compressMaxSave time.Duration) {
 	yesterday := time.Now().AddDate(0, 0, -1).Format(dateFormat)
 
 	for _, dir := range logDirs {
+		// 处理跨天日志
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if currentLogRegex.MatchString(path) && isYesterdayLog(path, yesterday) {
 				zap.S().Infof("检测到跨天日志：%s", path)
@@ -80,6 +81,11 @@ func processOvernightLogs(logDirs []string) {
 		if err != nil {
 			zap.S().Error(err)
 			return
+		}
+
+		// 清理过期压缩日志
+		if err := cleanExpiredGzLogs(dir, compressMaxSave); err != nil {
+			zap.S().Errorf("清理过期日志失败：%v", err)
 		}
 	}
 }

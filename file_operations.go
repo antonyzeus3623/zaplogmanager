@@ -228,8 +228,14 @@ func gzipLogFile(src string) error {
 // cleanExpiredGzLogs 清理过期压缩日志（包含原始.log和压缩的.gz）
 func cleanExpiredGzLogs(logDir string, maxSaveTime time.Duration) error {
 	cutoffDate := time.Now().Add(-maxSaveTime)
+	zap.S().Debugf("开始清理过期日志，截止日期：%s", cutoffDate.Format("2006-01-02"))
 
 	return filepath.Walk(logDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// 只处理.gz文件
 		if !gzExtRegex.MatchString(path) {
 			return nil
 		}
@@ -238,7 +244,9 @@ func cleanExpiredGzLogs(logDir string, maxSaveTime time.Duration) error {
 		if fileDate, err := parseDateFromFileName(path); err == nil {
 			if fileDate.Before(cutoffDate) {
 				zap.S().Infof("清理过期文件：%s (创建时间：%s)", path, fileDate.Format(dateFormat))
-				return os.Remove(path)
+				if err := os.Remove(path); err != nil {
+					zap.S().Errorf("删除过期文件失败：%v", err)
+				}
 			}
 		}
 
@@ -246,18 +254,22 @@ func cleanExpiredGzLogs(logDir string, maxSaveTime time.Duration) error {
 	})
 }
 
-// parseDateFromFileName 日期解析
+// parseDateFromFileName 从文件名解析日期
 func parseDateFromFileName(path string) (time.Time, error) {
 	// 匹配格式示例:
 	// - log-20250422.log.1.gz
 	// - applog_2025-04-22.log.5.gz
+	// - log-20250422.log.gz
 
 	re := regexp.MustCompile(`(\d{4})[-_]?(\d{2})[-_]?(\d{2})`)
 	matches := re.FindStringSubmatch(filepath.Base(path))
 	if len(matches) < 4 {
 		return time.Time{}, fmt.Errorf("invalid filename format")
 	}
-	return time.Parse("20060102", fmt.Sprintf("%s%s%s", matches[1], matches[2], matches[3]))
+
+	// 尝试解析日期
+	dateStr := fmt.Sprintf("%s%s%s", matches[1], matches[2], matches[3])
+	return time.Parse("20060102", dateStr)
 }
 
 // safeCompress 安全压缩函数
