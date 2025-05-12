@@ -261,22 +261,22 @@ func cleanExpiredGzLogs(logDir string, maxSaveTime time.Duration) error {
 // parseDateFromFileName 从文件名解析日期
 func parseDateFromFileName(path string) (time.Time, error) {
 	// 匹配格式示例:
-	// - log-20250422.log.1.gz
+	// - log-20250507.1.gz
+	// - log-20250508.log.1.gz
 	// - applog_2025-04-22.log.5.gz
-	// - log-20250422.log.gz
 
 	re := regexp.MustCompile(
-		`(?:^|[-_./])(20\d{2})(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])(?:[-_.]|$)`,
+		`(?:^|[-_./])(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])(?:[-_.]|$)`,
 	)
 	matches := re.FindStringSubmatch(filepath.Base(path))
-	if len(matches) < 2 {
+	if len(matches) < 4 {
 		return time.Time{}, fmt.Errorf("invalid filename format")
 	}
 
 	// 提取年月日
 	year := matches[1]
-	month := matches[0][len(year) : len(year)+2]
-	day := matches[0][len(year)+2 : len(year)+4]
+	month := matches[2]
+	day := matches[3]
 
 	// 尝试解析日期
 	dateStr := fmt.Sprintf("%s%s%s", year, month, day)
